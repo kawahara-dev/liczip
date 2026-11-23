@@ -1,0 +1,970 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>liczip — ライセンス混入ZIPチェッカー</title>
+<style>
+:root { color-scheme: light; font: 100%/1.65 system-ui, sans-serif; color: #182734; background: #edf3f5; }
+* { box-sizing: border-box; }
+body { margin: 0; }
+header { background: #123340; color: white; padding: 2.25rem max(1rem, calc((100% - 72rem)/2)); }
+header p, h1, h2 { margin: 0; }
+.brand { color: #a6e5dd; font-weight: 700; letter-spacing: .08em; }
+h1 { font-size: clamp(1.45rem, 4vw, 2.4rem); }
+main { width: min(72rem, 100% - 2rem); margin: 1.5rem auto 3rem; }
+section { background: white; border: 1px solid #ccdce0; border-radius: .65rem; padding: 1.25rem; margin-block: 1rem; }
+.fields, .actions { display: flex; flex-wrap: wrap; align-items: end; gap: .8rem 1rem; }
+label { display: block; font-weight: 650; }
+input, button { font: inherit; }
+input[type=file] { max-width: 100%; }
+button { border: 1px solid #527780; border-radius: .35rem; padding: .4rem .65rem; background: white; color: inherit; }
+button { cursor: pointer; font-weight: 650; }
+button:disabled { opacity: .55; cursor: default; }
+#scan { background: #125d59; color: white; }
+:focus-visible { outline: 3px solid #208a82; outline-offset: 3px; }
+#status { margin-bottom: 0; }
+.disclaimer { color: #435762; }
+.summary { display: flex; flex-wrap: wrap; gap: .65rem; margin: .8rem 0; }
+.summary span { background: #edf3f5; border-radius: .35rem; padding: .35rem .65rem; }
+.table-wrap { overflow: auto; margin-top: .8rem; }
+table { border-collapse: collapse; width: 100%; min-width: 58rem; }
+th, td { text-align: left; vertical-align: top; padding: .6rem; border-bottom: 1px solid #dbe6e9; overflow-wrap: anywhere; }
+th { background: #edf3f5; }
+td:first-child { min-width: 13rem; }
+.risk { font-weight: 750; white-space: nowrap; }
+.high { color: #a12a24; } .medium { color: #815000; } .low { color: #216254; } .unknown { color: #4d5e68; }
+ul { padding-left: 1.25rem; }
+#checklist label { font-weight: 400; display: inline; }
+#drop { border: 1px dashed #527780; border-radius: .35rem; padding: .6rem; }
+#selected-file { overflow-wrap: anywhere; }
+fieldset { border: 0; margin: 0; padding: 0; }
+legend { font-weight: 650; }
+textarea { width: 100%; margin-top: .75rem; min-height: 12rem; font: inherit; }
+</style>
+</head>
+<body>
+<header>
+<p class="brand">liczip</p>
+<h1>ライセンス混入ZIPチェッカー</h1>
+<p>配布前に、同梱ファイルのライセンスと確認事項を調べます。</p>
+</header>
+<main>
+<section aria-label="検査設定">
+<div class="fields">
+<div id="drop"><label for="archive">配布用ZIPをドロップ、または選択</label><input id="archive" type="file" accept=".zip,application/zip"><div id="selected-file" role="status"></div></div>
+<fieldset id="mode"><legend>配布形態</legend>
+<label><input type="radio" name="mode" value="commercial"> 有料・商用配布</label>
+<label><input type="radio" name="mode" value="free"> 無料配布</label>
+<label><input type="radio" name="mode" value="oss"> OSSとして公開</label>
+</fieldset>
+</div>
+<p>事業・販促目的の無料配布も「有料・商用配布」を選択してください。OSS公開と商用配布を行う場合は両方の条件で確認してください。</p>
+<div class="actions"><button id="scan" type="button" disabled>ZIPを検査</button><button id="cancel" type="button" hidden>中止</button></div>
+<p>ZIPは端末内で処理します。</p>
+<p class="disclaimer" id="input-disclaimer"></p>
+<p id="status" role="status"></p>
+</section>
+<div id="results" hidden>
+<section>
+<h2>検査結果</h2>
+<div id="summary" class="summary"></div>
+<p class="disclaimer" id="result-disclaimer"></p>
+<label><input id="directory-view" type="checkbox"> ディレクトリ一覧を表示</label>
+<div class="actions"><button id="previous" type="button">前のページ</button><span id="page" role="status"></span><button id="next" type="button">次のページ</button></div>
+<div class="table-wrap" tabindex="0" role="region" aria-label="ZIP内のエントリ">
+<table>
+<thead><tr><th scope="col">パス</th><th scope="col">展開サイズ（B）</th><th scope="col">圧縮方式</th><th scope="col">ライセンス</th><th scope="col">根拠</th><th scope="col">リスク</th><th scope="col">必要な対応</th></tr></thead>
+<tbody id="rows"></tbody>
+</table>
+</div>
+</section>
+<section><h2>義務チェックリスト</h2><ul id="checklist"></ul></section>
+<section>
+<h2>Markdownレポート</h2>
+<div class="actions"><button id="copy" type="button">Markdownをコピー</button><button id="download" type="button">Markdownをダウンロード</button></div>
+<textarea id="report" aria-label="Markdownレポート" readonly hidden></textarea>
+<p id="report-status" role="status"></p>
+</section>
+</div>
+</main>
+<script id="core">
+'use strict';
+
+const KiB = 1024;
+const MiB = KiB ** 2;
+const limits = { archive: 100 * MiB, central: 8 * MiB, entries: 10000, name: 1024,
+  text: MiB, license: 256 * KiB, nested: 8 * MiB, output: 32 * MiB };
+const utf8 = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true });
+const cp932 = new TextDecoder('shift_jis', { fatal: true });
+const pause = () => new Promise(resolve => setTimeout(resolve, 0));
+
+function fail(message) { throw new Error(message); }
+
+function binary(bytes) {
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  return { u16: offset => view.getUint16(offset, true), u32: offset => view.getUint32(offset, true) };
+}
+
+async function readRange(blob, start, length, signal) {
+  signal?.throwIfAborted();
+  const bytes = new Uint8Array(await blob.slice(start, start + length).arrayBuffer());
+  signal?.throwIfAborted();
+  return bytes;
+}
+
+function decodeName(name, extra, flags) {
+  if (flags & 0x800) return { path: utf8.decode(name), encoding: 'UTF-8' };
+  for (const field of extra) {
+    if (field.id !== 0x7075 || field.data.length < 5 || field.data[0] !== 1 ||
+        binary(field.data).u32(1) !== crc32(name)) continue;
+    try { return { path: utf8.decode(field.data.subarray(5)), encoding: 'Unicode Path extra' }; }
+    catch { /* Fall back to the original filename. */ }
+  }
+  try { return { path: utf8.decode(name), encoding: 'UTF-8（推定）' }; }
+  catch { return { path: cp932.decode(name), encoding: 'CP932系（推定）' }; }
+}
+
+function centralEntries(bytes, count, start) {
+  const { u16, u32 } = binary(bytes);
+  const entries = [];
+  let offset = 0;
+  for (let i = 0; i < count; i++) {
+    if (offset + 46 > bytes.length || u32(offset) !== 0x02014b50) fail('中央ディレクトリが破損しています。');
+    const flags = u16(offset + 8), method = u16(offset + 10), crc = u32(offset + 16);
+    const compressed = u32(offset + 20), size = u32(offset + 24), local = u32(offset + 42);
+    const nameLength = u16(offset + 28), nameEnd = offset + 46 + nameLength;
+    const extraEnd = nameEnd + u16(offset + 30), next = extraEnd + u16(offset + 32);
+    if (next > bytes.length) fail('中央ディレクトリのエントリが不正です。');
+    if (u16(offset + 34)) fail('分割ZIPには対応していません。');
+    if ([compressed, size, local].includes(0xffffffff)) fail('ZIP64には対応していません。');
+    const name = bytes.subarray(offset + 46, nameEnd);
+    const extra = [];
+    for (let pos = nameEnd; pos < extraEnd;) {
+      if (pos + 4 > extraEnd) fail('中央ディレクトリの追加フィールドが不正です。');
+      const id = u16(pos), end = pos + 4 + u16(pos + 2);
+      if (end > extraEnd) fail('中央ディレクトリの追加フィールドが不正です。');
+      if (id === 1) fail('ZIP64には対応していません。');
+      extra.push({ id, data: bytes.subarray(pos + 4, end) });
+      pos = end;
+    }
+    let path = '', encoding = '', issue = '';
+    if (nameLength > limits.name) issue = 'ファイル名のサイズ上限を超過';
+    else {
+      try { ({ path, encoding } = decodeName(name, extra, flags)); }
+      catch { issue = 'ファイル名の文字コードが不正'; }
+    }
+    const key = path.replace(/\/$/, '');
+    const unsafe = path.includes('\\') || pathControl.test(path) || /^[a-z]:/i.test(path) ||
+      key.split('/').some(part => !part || part === '.' || part === '..');
+    if (!issue && unsafe) issue = '特殊なパス';
+    const validPath = !issue;
+    if (!validPath) path = `[エントリ ${i + 1}] ${path ? visible(path) : Array.from(name.subarray(0, 32),
+      byte => byte.toString(16).padStart(2, '0')).join(' ')}`;
+    const attributes = u32(offset + 38);
+    const kind = (u16(offset + 4) >> 8) === 3 ? attributes >>> 28 : 0;
+    const directory = path.endsWith('/') || Boolean(attributes & 16) || kind === 4;
+    if (flags & 0x2000) fail('中央ディレクトリ暗号化には対応していません。');
+    if (!issue) {
+      if (flags & 0x41) issue = '暗号化されたエントリ';
+      else if (kind && ![4, 8].includes(kind)) issue = 'シンボリックリンク等の特殊ファイル';
+      else if (![0, 8].includes(method)) issue = '未対応の圧縮方式';
+    }
+    entries.push({ path, key, validPath, encoding, directory, method, size, compressed, crc, flags, local, name, issue });
+    offset = next;
+  }
+  if (offset !== bytes.length) fail('中央ディレクトリの件数が一致しません。');
+  if (entries.length ? Math.min(...entries.map(entry => entry.local)) !== 0 : start !== 0)
+    fail('自己解凍形式または先頭の追加データには対応していません。');
+  return entries;
+}
+
+async function localRange(blob, entry, central, signal) {
+  const { local, compressed, size, crc, flags, method, name } = entry;
+  if (local + 30 > central) fail('ローカルヘッダーが不正');
+  const { u16, u32 } = binary(await readRange(blob, local, 30, signal));
+  if (u32(0) !== 0x04034b50 || u16(6) !== flags || u16(8) !== method || u16(26) !== name.length)
+    fail('ローカルヘッダーが中央ディレクトリと不一致');
+  const dataStart = local + 30 + name.length + u16(28);
+  let end = dataStart + compressed;
+  if (end > central || (method === 0 && compressed !== size) || (!compressed && size))
+    fail('データの範囲またはサイズが不正');
+  const localName = await readRange(blob, local + 30, name.length, signal);
+  if (name.some((byte, i) => byte !== localName[i])) fail('ローカルヘッダーの名前が不一致');
+  if (flags & 8) {
+    const descriptor = await readRange(blob, end, Math.min(16, central - end), signal);
+    const { u32: field } = binary(descriptor);
+    const matches = [0, 4].filter(pos => descriptor.length >= pos + 12 &&
+      (!pos || field(0) === 0x08074b50) && field(pos) === crc &&
+      field(pos + 4) === compressed && field(pos + 8) === size);
+    if (matches.length !== 1) fail('データ記述子が不正');
+    end += matches[0] + 12;
+  } else if (u32(14) !== crc || u32(18) !== compressed || u32(22) !== size) {
+    fail('ローカルヘッダーのCRCまたはサイズが不一致');
+  }
+  return { dataStart, end };
+}
+
+async function parseZip(input, signal, account = { entries: 0 }) {
+  const blob = input instanceof Blob ? input : new Blob([input]);
+  if (blob.size > limits.archive) fail('ZIPは100 MiBまで検査できます。');
+  const tailStart = Math.max(0, blob.size - 65557);
+  const tail = await readRange(blob, tailStart, blob.size - tailStart, signal);
+  const { u16, u32 } = binary(tail);
+  let selected, reason = 'ZIPの終端レコードが見つかりません。';
+  // An EOCD-shaped sequence can occur in the comment of the real EOCD.
+  for (let end = tail.length - 22; end >= 0; end--) {
+    if (u32(end) !== 0x06054b50 || end + 22 + u16(end + 20) !== tail.length) continue;
+    const count = u16(end + 10), start = u32(end + 16), length = u32(end + 12);
+    let entries;
+    try {
+      if (count === 0xffff || start === 0xffffffff || length === 0xffffffff ||
+          (end >= 20 && u32(end - 20) === 0x07064b50)) fail('ZIP64には対応していません。');
+      if (u16(end + 4) || u16(end + 6) || u16(end + 8) !== count) fail('分割ZIPには対応していません。');
+      if (count > limits.entries || length > limits.central) fail('中央ディレクトリまたはエントリ数の上限を超過');
+      if (start + length !== tailStart + end || length < count * 46) fail('中央ディレクトリの範囲が不正です。');
+      entries = centralEntries(await readRange(blob, start, length, signal), count, start);
+    } catch (error) {
+      signal?.throwIfAborted();
+      reason = error.message;
+      continue;
+    }
+    if (selected) fail('有効なZIP終端レコードが複数あります。');
+    selected = { entries, start };
+  }
+  if (!selected) fail(reason);
+  const { entries, start } = selected;
+  if (entries.length > limits.entries - account.entries) fail('全ZIPのエントリ数の合計上限を超過');
+  account.entries += entries.length;
+  const byPath = new Map();
+  for (const [i, entry] of entries.entries()) {
+    if (i % 64 === 0) await pause();
+    try { Object.assign(entry, await localRange(blob, entry, start, signal)); }
+    catch (error) {
+      signal?.throwIfAborted();
+      entry.issue ||= error.message;
+    }
+    delete entry.name;
+    if (!entry.validPath) continue;
+    const matches = byPath.get(entry.key) || [];
+    matches.push(entry);
+    byPath.set(entry.key, matches);
+  }
+  for (const entry of entries) {
+    if (!entry.validPath) continue;
+    let key = entry.key;
+    while (key) {
+      const matches = byPath.get(key) || [];
+      if (matches.length > 1 || (key !== entry.key && matches.some(item => !item.directory))) {
+        entry.issue = '重複または衝突するパス';
+        entry.validPath = false;
+        break;
+      }
+      key = key.slice(0, Math.max(0, key.lastIndexOf('/')));
+    }
+  }
+  // A file which is also used as a parent is itself part of the collision.
+  for (const entry of entries) {
+    if (entry.issue !== '重複または衝突するパス') continue;
+    let key = entry.key;
+    while (key.includes('/')) {
+      key = key.slice(0, key.lastIndexOf('/'));
+      for (const parent of byPath.get(key) || []) {
+        if (!parent.directory) {
+          parent.issue = entry.issue;
+          parent.validPath = false;
+        }
+      }
+    }
+  }
+  let furthest;
+  for (const entry of entries.filter(item => item.end !== undefined).sort((a, b) => a.local - b.local)) {
+    if (furthest && entry.local < furthest.end) entry.issue = furthest.issue = 'ローカル領域が重複';
+    if (!furthest || entry.end > furthest.end) furthest = entry;
+  }
+  return entries;
+}
+
+const crcTable = Array.from({ length: 256 }, (_, index) => {
+  let crc = index;
+  for (let i = 0; i < 8; i++) crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  return crc;
+});
+
+function crc32(bytes) {
+  let crc = 0xffffffff;
+  for (const byte of bytes) crc = (crc >>> 8) ^ crcTable[(crc ^ byte) & 255];
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+async function readBody(blob, entry, keep, account, signal) {
+  let stream = blob.slice(entry.dataStart, entry.dataStart + entry.compressed).stream();
+  if (entry.method === 8) {
+    let inflater;
+    try { inflater = new DecompressionStream('deflate-raw'); }
+    catch { fail('この環境ではdeflateの展開に未対応'); }
+    stream = stream.pipeThrough(inflater);
+  }
+  const reader = stream.getReader();
+  const abort = () => { void reader.cancel().catch(() => {}); };
+  signal?.addEventListener('abort', abort, { once: true });
+  const output = new Uint8Array(Math.min(keep, entry.size));
+  let size = 0, crc = 0xffffffff;
+  try {
+    while (true) {
+      signal?.throwIfAborted();
+      const { value, done } = await reader.read();
+      signal?.throwIfAborted();
+      if (done) break;
+      account.remaining -= value.length;
+      if (account.remaining < 0) fail('実測展開量の合計上限を超過');
+      if (size + value.length > entry.size) fail('展開サイズが申告値を超過');
+      if (size < output.length) output.set(value.subarray(0, output.length - size), size);
+      for (const byte of value) crc = (crc >>> 8) ^ crcTable[(crc ^ byte) & 255];
+      size += value.length;
+    }
+  } finally {
+    signal?.removeEventListener('abort', abort);
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
+  if (size !== entry.size) fail('展開サイズが一致しません。');
+  if (((crc ^ 0xffffffff) >>> 0) !== entry.crc) fail('CRCが一致しません。');
+  return output;
+}
+
+function decodeBody(bytes, truncated = false) {
+  if (bytes.includes(0)) fail('本文にNULが含まれています');
+  for (const encoding of ['utf-8', 'shift_jis']) {
+    try { return new TextDecoder(encoding, { fatal: true }).decode(bytes, { stream: truncated }); }
+    catch { /* Try the next encoding. */ }
+  }
+  fail('本文の文字コードが不正');
+}
+
+const modeNames = { commercial: '有料・商用配布', free: '無料配布', oss: 'OSSとして公開' };
+const riskNames = { high: '高', medium: '中', low: '低', unknown: '不明' };
+const severity = { high: 4, medium: 3, unknown: 2, low: 1 };
+const matrix = {
+  strong: ['high', 'high', 'medium'],
+  weak: ['medium', 'medium', 'low'],
+  nc: ['high', 'low', 'medium'],
+  sa: ['medium', 'medium', 'medium'],
+  nd: ['medium', 'medium', 'medium'],
+  permissive: ['low', 'low', 'low'],
+  public: ['low', 'low', 'low'],
+  attribution: ['low', 'low', 'low'],
+  thirdParty: ['high', 'medium', 'medium']
+};
+const actions = {
+  review: 'ライセンス原文と配布条件を確認する',
+  nested: 'ネストしたZIPを個別に検査する',
+  unread: '検査できなかった内容を手動で確認する',
+  include: '該当コンポーネントのライセンス文を同梱する',
+  bundled: 'ライセンス文の同梱を確認する',
+  weakSource: '適用部分のソース提供条件を確認する',
+  network: 'ネットワーク経由で提供する場合の条件を確認する',
+  relink: '組合せ・再リンクの条件を確認する',
+  copyright: '著作権表示・ライセンス表示を確認する',
+  attribution: 'クレジットとライセンス表示を確認する',
+  credits: '帰属情報の記載を確認し、不足分を追加する',
+  source: '該当範囲のソースコード開示などの条件を確認する',
+  notice: '上流NOTICEの扱いと変更表示を確認する',
+  remove: '非商用条件の素材を除去または差し替える',
+  nc: '配布や使われ方が非商用条件を満たすか確認する',
+  sa: '改変物に適用するライセンスの継承条件を確認する',
+  nd: '改変の有無と改変物の配布条件を確認する',
+  expression: 'SPDX式の選択肢・組み合わせ・例外条件を確認する'
+};
+const licenseName = /^(?:LICENSE|LICENCE|COPYING|NOTICE)(?:[._-][A-Z0-9._-]+)?$/i;
+const creditName = /^(?:NOTICE|AUTHORS|CREDITS)(?:[._-][A-Z0-9._-]+)?$/i;
+const thirdPartyPath = /^(?:vendor|third_party|third-party|node_modules|external|deps|bower_components)$/i;
+const pathControl = /[\x00-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]/;
+const textName = /\.(?:c|h|cc|cpp|hpp|cs|go|java|kt|rs|py|rb|php|sh|ps1|js|mjs|cjs|jsx|ts|tsx|vue|svelte|css|scss|html|xml|svg|sql|yaml|yml|toml|json|ini|md|rst|txt)$/i;
+
+function family(id) {
+  const base = id.replace(/^(AGPL-3\.0|GPL-[23]\.0|LGPL-(?:2\.1|3\.0))-(?:only|or-later)$/, '$1');
+  if (/^(?:AGPL-3\.0|GPL-[23]\.0)$/.test(base)) return 'strong';
+  if (/^(?:LGPL-(?:2\.1|3\.0)|MPL-2\.0|EPL-2\.0)$/.test(base)) return 'weak';
+  if (/^CC-BY-NC(?:-SA)?-(?:[1-4]\.0|2\.5)$/.test(id)) return 'nc';
+  if (/^CC-BY-SA-(?:[1-4]\.0|2\.5)$/.test(id)) return 'sa';
+  if (/^CC-BY-ND-(?:[1-4]\.0|2\.5)$/.test(id)) return 'nd';
+  if (/^CC-BY-(?:[1-4]\.0|2\.5)$/.test(id)) return 'attribution';
+  if (/^(?:MIT|BSD-[23]-Clause|Apache-2\.0|ISC)$/.test(id)) return 'permissive';
+  if (/^(?:CC0-1\.0|Unlicense|Public Domain)$/.test(id)) return 'public';
+  return '';
+}
+
+function classifyLicense(body) {
+  const lines = body.split(/\r\n?|\n/);
+  const first = lines.findIndex(line => line.trim());
+  const title = (lines[first] || '').trim().replace(/^#+\s*/, '');
+  const heading = [title, lines.slice(first + 1).find(line => line.trim())?.trim() || ''].join(' ');
+  const normalized = body.replace(/\s+/g, ' ').trim();
+  const contains = pattern => pattern.test(normalized);
+  const sections = pattern => lines.some(line => pattern.test(line.trim()));
+  const clauseStart = /^\s*(\d+)[.)]\s+(.+)/;
+  const numbered = [];
+  let clause;
+  for (const line of lines) {
+    const match = line.match(clauseStart);
+    if (match) {
+      clause = { number: match[1], text: match[2] };
+      numbered.push(clause);
+    } else if (clause && line.trim()) clause.text += ' ' + line.trim();
+    else clause = undefined;
+  }
+  const bsd = contains(/\bRedistribution and use in source and binary forms\b/i) &&
+    numbered[0]?.number === '1' && /Redistributions of source code.*(?:retain|notice)/i.test(numbered[0].text) &&
+    numbered[1]?.number === '2' && /Redistributions in binary form.*(?:reproduce|notice)/i.test(numbered[1].text);
+  const gnu = (name, version) => new RegExp(`^${name},? Version ${version}(?=[,\\s]|$)`, 'i').test(heading);
+  const copying = contains(/\bterms and conditions for copying, distribution and modification\b/i);
+  const cc = normalized.match(/^https?:\/\/creativecommons\.org\/licenses\/(by-nc-sa|by-nc|by-sa|by-nd|by)\/(1\.0|2\.0|2\.5|3\.0|4\.0)(?:\/legalcode)?\/?$/i);
+  const ccTitle = title.match(/^(?:Creative Commons )?Attribution((?:[- ](?:NonCommercial|ShareAlike|NoDerivatives|NoDerivs))*) (1\.0|2\.0|2\.5|3\.0|4\.0)(?: International| Unported| Generic)?$/i);
+  const ccType = ccTitle && ('by' + ccTitle[1].toLowerCase().replace(/[- ]noncommercial/g, '-nc')
+    .replace(/[- ]sharealike/g, '-sa').replace(/[- ](?:noderivatives|noderivs)/g, '-nd'));
+  const ccBody = ccTitle && ['by', 'by-sa', 'by-nc', 'by-nc-sa', 'by-nd'].includes(ccType) &&
+    sections(/^(?:section \d+\.?\s*[–—-]?\s*|\d+\.\s*)?(?:license grant|scope)\b/i) &&
+    sections(/^(?:section \d+\.?\s*[–—-]?\s*|\d+\.\s*)?(?:license conditions|restrictions)\b/i);
+  const matches = [
+    ['MIT', contains(/\bPermission is hereby granted, free of charge, to any person obtaining a copy\b/i) &&
+      contains(/\bto deal in the Software without restriction\b/i) &&
+      contains(/\bthe above copyright notice and this permission notice shall be included\b/i)],
+    ['BSD-2-Clause', bsd && numbered.length === 2],
+    ['BSD-3-Clause', bsd && numbered.length === 3 && numbered[2].number === '3' &&
+      /\bmay be used to endorse or promote\b/i.test(numbered[2].text)],
+    ['Apache-2.0', /^Apache License,? Version 2\.0(?=[,\s]|$)/i.test(heading) &&
+      sections(/^(?:1\.\s*)?Definitions\b/i) && sections(/^(?:4\.\s*)?Redistribution\b/i)],
+    ['ISC', contains(/\bPermission to use, copy, modify, and\/or distribute this software\b/i) &&
+      contains(/\bthe above copyright notice and this permission notice appear\b/i)],
+    ['Unlicense', contains(/\bThis is free and unencumbered software released into the public domain\b/i) &&
+      contains(/\bAnyone is free to copy, modify, publish, use, compile, sell, or distribute\b/i) &&
+      contains(/\bthe software is provided ["“]as is["”], without warranty\b/i)],
+    ['CC0-1.0', /^https?:\/\/creativecommons\.org\/publicdomain\/zero\/1\.0(?:\/legalcode)?\/?$/i.test(normalized) ||
+      (/^CC0 1\.0 Universal$/i.test(title) && sections(/^(?:2\.\s*)?Waiver\b/i))],
+    ['GPL-2.0', gnu('GNU GENERAL PUBLIC LICENSE', '2') && copying],
+    ['GPL-3.0', gnu('GNU GENERAL PUBLIC LICENSE', '3') && contains(/\bterms and conditions\b/i) &&
+      sections(/^(?:6\.\s*)?Conveying Non-Source Forms\b/i)],
+    ['LGPL-2.1', gnu('GNU LESSER GENERAL PUBLIC LICENSE', '2\\.1') && copying],
+    ['LGPL-3.0', gnu('GNU LESSER GENERAL PUBLIC LICENSE', '3') &&
+      contains(/\bincorporates the terms and conditions of version 3 of the GNU General Public License\b/i) &&
+      sections(/^(?:4\.\s*)?Combined Works\b/i)],
+    ['AGPL-3.0', gnu('GNU AFFERO GENERAL PUBLIC LICENSE', '3') &&
+      sections(/^(?:13\.\s*)?Remote Network Interaction\b/i)],
+    ['MPL-2.0', /^Mozilla Public License,? Version 2\.0(?=[,\s]|$)/i.test(heading) &&
+      contains(/["“]Covered Software["”] means\b/i) && sections(/^(?:3\.1\.\s*)?Distribution of Source Form\b/i)],
+    ['EPL-2.0', /^Eclipse Public License\s*[-–]?\s*(?:Version )?2\.0(?=[,\s]|$)/i.test(heading) &&
+      contains(/["“]Contributor["”]\s+means\b/i) && sections(/^(?:3\.\s*)?Requirements\b/i)],
+    [cc ? `CC-${cc[1].toUpperCase()}-${cc[2]}` : ccBody ? `CC-${ccType.toUpperCase()}-${ccTitle[2]}` : '', cc || ccBody],
+    ['Public Domain', sections(/^Dedicated to the public domain\.$/i)]
+  ].filter(([, matched]) => matched);
+  const line = Math.max(0, matches[0]?.[0] === 'Public Domain' ?
+    lines.findIndex(value => /^Dedicated to the public domain\.$/i.test(value.trim())) : first);
+  return matches.map(([id]) => ({ id, basis: `${line + 1} 行目・${id} 本文規則「${visible(lines[line]).trim().slice(0, 100)}」` }));
+}
+
+function spdxExpressions(body, truncated) {
+  const lines = body.split(/\r\n?|\n/);
+  if (truncated) lines.pop();
+  return lines.flatMap((line, index) => {
+    const match = line.match(/^\s*(?:(?:\/\/|\/\*+|\*|#|;|--|<!--)\s*)?SPDX-License-Identifier:[ \t]*(.*?)[ \t]*(?:\*\/|-->)?[ \t]*$/);
+    return match ? [{ raw: match[1].trim(), line: index + 1 }] : [];
+  });
+}
+
+function parseExpression(expression) {
+  const id = expression.replace(/^((?:GPL-[23]\.0|AGPL-3\.0|LGPL-(?:2\.1|3\.0)))(\+)?$/, (_, base, plus) =>
+    base + (plus ? '-or-later' : '-only'));
+  const known = id !== 'Public Domain' && family(id);
+  return { ids: known ? [id] : [], complex: !known };
+}
+
+const directoryOf = path => path.slice(0, path.lastIndexOf('/') + 1);
+const basenameOf = path => path.slice(path.lastIndexOf('/') + 1);
+
+function closestScope(scopes, path, boundary) {
+  let dir = directoryOf(path);
+  while (true) {
+    if (scopes.has(dir)) return scopes.get(dir);
+    if (dir === boundary || !dir) return [];
+    dir = directoryOf(dir.slice(0, -1));
+  }
+}
+
+function addScope(scopes, path, value) {
+  const dir = directoryOf(path);
+  if (!scopes.has(dir)) scopes.set(dir, []);
+  scopes.get(dir).push(value);
+}
+
+function componentBoundary(path) {
+  const parts = path.split('/');
+  let boundary = '';
+  for (let i = 0; i < parts.length - 1; i++) {
+    if (thirdPartyPath.test(parts[i])) boundary = parts.slice(0, Math.min(i + 2, parts.length - 1)).join('/') + '/';
+  }
+  return boundary;
+}
+
+async function inspectZip(input, options = {}, depth = 0, account = { entries: 0, remaining: limits.output }) {
+  const { signal, progress } = options;
+  const blob = input instanceof Blob ? input : new Blob([input]);
+  const entries = await parseZip(blob, signal, account);
+  const scopes = new Map();
+  const credits = new Map();
+  const jobs = [[], [], []];
+  for (const entry of entries) {
+    if (entry.directory) continue;
+    const name = basenameOf(entry.path);
+    entry.nested = /\.zip$/i.test(name);
+    entry.isLicense = licenseName.test(name);
+    entry.isNotice = /^notice(?:$|[._-])/i.test(name);
+    entry.isCredit = creditName.test(name);
+    if (entry.validPath && entry.isCredit) addScope(credits, entry.path, entry);
+    if (entry.validPath && entry.isLicense && !entry.isNotice) addScope(scopes, entry.path, entry);
+    if (entry.issue) continue;
+    if (entry.nested) {
+      if (depth) entry.issue = '2階層目以降のネストZIPは未検査';
+      else jobs[2].push(entry);
+    } else if (entry.isLicense) jobs[0].push(entry);
+    else if (textName.test(name) || entry.isCredit) jobs[1].push(entry);
+    else entry.outside = true;
+  }
+  const queue = jobs.flat();
+  for (const [index, entry] of queue.entries()) {
+    if (index % 16 === 0) await pause();
+    signal?.throwIfAborted();
+    progress?.(index, queue.length, depth);
+    const cap = entry.nested ? limits.nested : entry.isLicense ? limits.license : limits.text;
+    if (entry.size > cap) entry.issue = '本文またはネストZIPのサイズ上限を超過';
+    else if (entry.size > 64 * KiB && entry.size > entry.compressed * 200) entry.issue = '圧縮比の上限を超過';
+    else if (account.remaining < 0 || entry.size > account.remaining) entry.issue = '検査全体の展開量の合計上限を超過';
+    if (entry.issue) continue;
+    try {
+      const keep = entry.isLicense || entry.isCredit || entry.nested ? cap : 2 * KiB;
+      const body = await readBody(blob, entry, keep, account, signal);
+      if (entry.nested) {
+        entry.child = await inspectZip(body, options, depth + 1, account);
+        continue;
+      }
+      const prefix = decodeBody(body.subarray(0, 2 * KiB), entry.size > 2 * KiB);
+      entry.expressions = spdxExpressions(prefix, entry.size > 2 * KiB);
+      if (entry.isCredit) entry.creditStatus = decodeBody(body).trim() ? '内容あり' : '空';
+      if (entry.isLicense) {
+        entry.classifications = classifyLicense(decodeBody(body));
+        if (entry.isNotice && entry.classifications.length) addScope(scopes, entry.path, entry);
+      }
+    } catch (error) {
+      signal?.throwIfAborted();
+      entry.issue = `${entry.nested ? 'ネストZIP' : '本文'}を読み取れません（${error.message}）`;
+    }
+  }
+  progress?.(queue.length, queue.length, depth);
+  return { entries, scopes, credits };
+}
+
+const baseId = id => id.replace(/-(?:only|or-later)$/, '');
+const disclaimer = 'liczipは、ZIP内のライセンス表記を機械的に検出し、配布前の確認を支援します。検出の完全性、法的判断、配布の可否、ライセンス条件への適合を保証しません。配布前に、原文、出典、実際の利用・配布条件を確認してください。';
+
+function assess(scan, mode) {
+  const column = Object.keys(modeNames).indexOf(mode);
+  if (column < 0) fail('配布形態が不正です。');
+  const counts = { high: 0, medium: 0, low: 0, unknown: 0 };
+  const obligations = new Map();
+  const rows = [];
+
+  function collect(archive, prefix = '') {
+    for (const entry of archive.entries) {
+      const path = prefix + entry.path;
+      const evidence = entry.encoding ? [entry.encoding] : [];
+      if (entry.directory) {
+        rows.push({ ...entry, path, risk: '', labels: [], evidence, tasks: [] });
+        continue;
+      }
+      const boundary = entry.validPath ? componentBoundary(entry.path) : '';
+      const scope = entry.validPath ? closestScope(archive.scopes, entry.path, boundary) : [];
+      const scoped = scope.flatMap(source => (source.classifications || []).map(match => ({ ...match, source })));
+      const scopeIds = [...new Set(scoped.map(match => match.id))];
+      const blocked = scope.some(source => !source.classifications?.length);
+      const own = entry.classifications || [];
+      const raw = entry.expressions || [];
+      const declared = raw.map(({ raw: id }) => parseExpression(id));
+      const declaredIds = [...new Set(declared.flatMap(parsed => parsed.ids))];
+      const unresolved = declared.some(parsed => parsed.complex) || declaredIds.length > 1;
+      const labels = new Set();
+      const ids = new Set();
+      const tasks = new Map();
+      const add = (task, id = '') => tasks.set(JSON.stringify([task, id]), { task, id });
+      let conflict = false;
+      let unknown = false;
+
+      function explainScope() {
+        for (const match of scoped) evidence.push(`${prefix + match.source.path} の${match.basis}（適用範囲 ${prefix + directoryOf(match.source.path) || 'ルート'}）`);
+        for (const source of scope.filter(source => !source.classifications?.length))
+          evidence.push(`${prefix + source.path} の${source.issue || '本文パターンが不明'}`);
+      }
+
+      for (const declaration of raw) {
+        evidence.push(`${path}:${declaration.line} のSPDX宣言「${visible(declaration.raw) || '空欄'}」`);
+      }
+      if (entry.issue || entry.nested) {
+        if (entry.issue) {
+          evidence.push(entry.issue);
+          add(entry.nested ? 'nested' : 'unread');
+        } else evidence.push('ネストZIPを1階層検査済み。内容は個別行に表示');
+        if (scope.length) {
+          evidence.push('親のライセンス文は参考情報');
+          explainScope();
+        }
+        unknown = true;
+      } else if (own.length) {
+        for (const match of own) {
+          ids.add(match.id);
+          labels.add(match.id);
+          evidence.push(`${path} の${match.basis}`);
+        }
+        conflict = own.length > 1 || declaredIds.some(id => !ids.has(baseId(id)));
+        unknown = conflict || unresolved;
+      } else if (raw.length) {
+        for (const id of unresolved ? [] : declaredIds) {
+          ids.add(id);
+          labels.add(id);
+        }
+        if (unresolved) labels.add('SPDX要確認');
+        conflict = scopeIds.length > 1 || (!unresolved && scopeIds.some(id => id !== baseId(declaredIds[0])));
+        if (conflict) for (const id of scopeIds) ids.add(id);
+        if (scope.length) explainScope();
+        unknown = unresolved || conflict;
+      } else {
+        for (const id of scopeIds) {
+          ids.add(id);
+          labels.add(id);
+        }
+        explainScope();
+        conflict = scopeIds.length > 1 || (scopeIds.length > 0 && blocked);
+        unknown = !ids.size || blocked || conflict;
+      }
+      if (entry.outside) evidence.push('本文走査の対象外');
+      if (unresolved && !entry.issue) {
+        evidence.push('SPDX要確認');
+        add('expression');
+      }
+      if (conflict) evidence.push('適用範囲要確認');
+      if (boundary) evidence.push(`第三者ファイルの手がかり ${prefix + boundary}`);
+      const component = entry.validPath && own.length ? directoryOf(entry.path) :
+        scoped.length && !entry.issue && !entry.nested ? directoryOf(scope[0].path) :
+          boundary || directoryOf(entry.path);
+      const credits = entry.validPath ? ancestorCredits(archive.credits, entry.path, component) : [];
+      if (credits.length) evidence.push(`帰属情報候補 ${credits.map(source =>
+        `${prefix + source.path}（${source.creditStatus || '存在・内容未確認'}）`).join('、')}`);
+      if (entry.isCredit && entry.validPath) evidence.push(`帰属情報文書（${entry.creditStatus || '存在・内容未確認'}）`);
+
+      let risk = 'low';
+      const raise = level => { if (severity[level] > severity[risk]) risk = level; };
+      if (unknown) {
+        // For known conflicting candidates, the third-party fallback only applies inside that boundary.
+        if (!ids.size || boundary || blocked) raise(boundary ? matrix.thirdParty[column] : 'unknown');
+        if (!entry.child) add('review');
+      }
+      for (const id of ids) {
+        const group = family(id);
+        raise(matrix[group][column]);
+        if (group === 'strong') add('source');
+        if (group === 'weak') add('weakSource');
+        if (id.startsWith('AGPL-')) add('network');
+        if (id.startsWith('LGPL-')) add('relink');
+        if (group === 'permissive') {
+          add('copyright');
+          if (id === 'Apache-2.0') add('notice');
+        }
+        if (['strong', 'weak', 'permissive'].includes(group)) {
+          const bundled = (own.length === 1 && own[0].id === baseId(id)) ||
+            scoped.some(match => match.source.classifications.length === 1 && match.id === baseId(id));
+          add(bundled ? 'bundled' : 'include', baseId(id));
+        }
+        if (id.startsWith('CC-BY')) {
+          add('attribution');
+          if (!credits.length) add('credits');
+        }
+        if (group === 'nc') add(mode === 'commercial' ? 'remove' : 'nc');
+        if (id.includes('-SA')) add('sa');
+        if (id.includes('-ND')) add('nd');
+      }
+      if (!ids.size && !entry.nested && !entry.issue) evidence.push('ライセンスを確定できず');
+      counts[risk]++;
+      const taskLabels = [];
+      for (const { task, id } of tasks.values()) {
+        const conditional = conflict && !['review', 'expression', 'unread', 'nested'].includes(task);
+        const label = `${conditional ? '該当する場合、' : ''}${id ? id + ' の' : ''}${actions[task]}`;
+        const target = prefix + component || 'ルート';
+        const key = JSON.stringify([target, task, id, conditional]);
+        if (!obligations.has(key)) obligations.set(key, { label, target, paths: [], evidence: new Set() });
+        const obligation = obligations.get(key);
+        obligation.paths.push(path);
+        obligation.evidence.add(evidence.find(item => item.includes('本文規則') || item.includes('SPDX宣言')) ||
+          entry.issue || evidence.find(item => item.includes('手がかり')) || 'ファイル別結果を参照');
+        taskLabels.push(label);
+      }
+      rows.push({ path, directory: false, size: entry.size, method: entry.method, issue: entry.issue, outside: entry.outside,
+        risk, labels: [...labels], evidence: [...new Set(evidence)].map(visible), tasks: [...new Set([...tasks.values()].map(item => item.task))],
+        taskLabels, review: unknown || unresolved || conflict });
+      if (entry.child) collect(entry.child, path + ' › ');
+    }
+  }
+
+  collect(scan);
+  rows.sort((a, b) => (severity[b.risk] || 0) - (severity[a.risk] || 0));
+  const issues = new Map();
+  for (const row of rows) {
+    const reason = row.issue || (row.outside ? '本文走査の対象外' : '');
+    if (reason) issues.set(reason, (issues.get(reason) || 0) + 1);
+  }
+  return { rows, counts, obligations, issues, mode, files: rows.filter(row => !row.directory).length,
+    review: rows.filter(row => !row.directory && row.review).length, state: rows.some(row => row.issue) ? '部分検査' : '完了' };
+}
+
+function ancestorCredits(credits, path, boundary) {
+  const sources = [];
+  let dir = directoryOf(path);
+  while (dir.startsWith(boundary)) {
+    for (const source of credits.get(dir) || []) sources.push(source);
+    if (!dir) break;
+    dir = directoryOf(dir.slice(0, -1));
+  }
+  return sources;
+}
+
+const compressionLabel = method => ({ 0: 'stored', 8: 'deflate' })[method] || `方式 ${method}`;
+const sizeLabel = row => `${row.size} B / ${compressionLabel(row.method)}`;
+// Escape Markdown-controlled punctuation and HTML characters from archive data.
+const visible = value => String(value ?? '').replace(/[\r\n\x00-\x1f\x7f-\x9f\u2028\u2029\u202a-\u202e\u2066-\u2069]/g,
+  char => '⟦U+' + char.charCodeAt(0).toString(16).toUpperCase().padStart(4, '0') + '⟧');
+const md = value => visible(value).replace(/[&<>"'\\|`*_~\[\]()#!+.-]/g, c => `&#${c.charCodeAt(0)};`);
+
+function markdown(result, archiveName) {
+  const lines = [
+    '# liczip 検査レポート', '',
+    `- ZIP：${md(archiveName)}`, `- 配布形態：${modeNames[result.mode]}`,
+    `- 検査状態：${result.state}`,
+    `- 検査ファイル総数：${result.files}（ディレクトリを除く）`,
+    ...Object.entries(result.counts).map(([level, count]) => `- ${riskNames[level]}：${count}`),
+    `- 要確認：${result.review}`, '', '## ファイル別結果', ''
+  ];
+  if (result.files) {
+    lines.push('| パス | 展開サイズ（B） | 圧縮方式 | 検出ライセンス | 根拠 | リスク | 必要な対応 |',
+      '| --- | ---: | --- | --- | --- | --- | --- |');
+    for (const row of result.rows.filter(row => !row.directory)) {
+      lines.push(`| ${[row.path, row.size, compressionLabel(row.method), row.labels.join('、') || '不明',
+        row.evidence.join('／'), riskNames[row.risk], row.taskLabels.join('／') || '—'].map(md).join(' | ')} |`);
+    }
+  } else lines.push('対象ファイルなし。');
+  const directories = result.rows.filter(row => row.directory);
+  if (directories.length) {
+    lines.push('', '## ディレクトリ一覧', '');
+    for (const row of directories)
+      lines.push(`- ${md(row.path)}（${md(sizeLabel(row))}${row.issue ? '／' + md(row.issue) : ''}）`);
+  }
+  lines.push('', '## 義務チェックリスト', '');
+  for (const { label, target, paths, evidence } of result.obligations.values()) {
+    lines.push(`- [ ] ${md(label)}（${md(target)}、${paths.length}件）`,
+      ...paths.map(path => `  - ${md(path)}`),
+      `  - 根拠：${[...evidence].map(md).join('／')}`);
+  }
+  if (!result.obligations.size) lines.push('自動で生成された項目なし。');
+  lines.push('', '## 検査上の注記', '');
+  if (result.issues.size) {
+    for (const [reason, count] of result.issues) lines.push(`- ${md(reason)}：${count}件`);
+  } else lines.push('未検査項目なし。');
+  lines.push('', '## 利用上の注意', '', disclaimer);
+  return lines.join('\n') + '\n';
+}
+</script>
+<script>
+'use strict';
+const byId = id => document.getElementById(id);
+const input = byId('archive');
+const mode = byId('mode');
+const button = byId('scan');
+const cancel = byId('cancel');
+const status = byId('status');
+const reportStatus = byId('report-status');
+const report = byId('report');
+const selectedMode = () => mode.querySelector(':checked')?.value;
+let file = null;
+let scan = null;
+let controller = null;
+let display = null;
+let page = 0;
+const pageSize = 100;
+byId('result-disclaimer').textContent = disclaimer;
+byId('input-disclaimer').textContent = disclaimer;
+
+function node(tag, content, className) {
+  const element = document.createElement(tag);
+  if (content) element.textContent = content;
+  if (className) element.className = className;
+  return element;
+}
+
+function renderPage() {
+  const dirs = byId('directory-view').checked;
+  const shown = display.rows.filter(row => row.directory === dirs);
+  const last = Math.max(0, Math.ceil(shown.length / pageSize) - 1);
+  page = Math.max(0, Math.min(page, last));
+  byId('previous').disabled = page === 0;
+  byId('next').disabled = page === last;
+  byId('page').textContent = shown.length ? `${page + 1} / ${last + 1} ページ（${shown.length}件）` : '対象なし';
+  const rows = document.createDocumentFragment();
+  for (const row of shown.slice(page * pageSize, (page + 1) * pageSize)) {
+    const tr = node('tr');
+    tr.append(node('td', visible(row.path)), node('td', String(row.size)), node('td', compressionLabel(row.method)),
+      node('td', row.labels.join('、') || (dirs ? '—' : '不明')),
+      node('td', dirs ? ['ディレクトリ', row.issue, ...row.evidence].filter(Boolean).join('／') : row.evidence.join('／')),
+      node('td', riskNames[row.risk] || '—', `risk ${row.risk}`),
+      node('td', row.taskLabels?.join('／') || '—'));
+    rows.append(tr);
+  }
+  byId('rows').replaceChildren(rows);
+}
+
+function render() {
+  display = assess(scan, selectedMode());
+  byId('summary').replaceChildren(
+    node('span', visible(file.name)), node('span', modeNames[display.mode]), node('span', display.state),
+    node('span', `検査ファイル ${display.files}件`), node('span', `要確認 ${display.review}件`),
+    ...Object.keys(riskNames).map(level => node('span', `${riskNames[level]} ${display.counts[level]}件`, `risk ${level}`))
+  );
+  renderPage();
+  const checklist = byId('checklist');
+  checklist.replaceChildren();
+  let index = 0;
+  for (const { label, target, paths, evidence } of display.obligations.values()) {
+    const item = node('li');
+    const checkbox = node('input');
+    checkbox.type = 'checkbox';
+    checkbox.id = `task-${index++}`;
+    const caption = node('label', ` ${label}（${visible(target)}、${paths.length}件）`);
+    caption.htmlFor = checkbox.id;
+    const details = node('details');
+    details.append(node('summary', '対象パス・根拠'),
+      node('p', paths.map(visible).join('、')), node('p', [...evidence].map(visible).join('／')));
+    item.append(checkbox, caption, details);
+    checklist.append(item);
+  }
+  if (!display.obligations.size) checklist.append(node('li', '自動で生成された項目なし。'));
+  report.value = markdown(display, file.name);
+  report.hidden = true;
+  reportStatus.textContent = '';
+  byId('results').hidden = false;
+}
+
+function updateButtons() {
+  button.disabled = !file || !selectedMode() || Boolean(controller);
+  cancel.hidden = !controller;
+}
+
+function resetResult() {
+  controller?.abort();
+  controller = null;
+  scan = display = null;
+  report.value = '';
+  byId('results').hidden = true;
+  page = 0;
+  byId('directory-view').checked = false;
+}
+
+function selectFiles(files) {
+  resetResult();
+  file = files.length === 1 ? files[0] : null;
+  input.value = '';
+  byId('selected-file').textContent = file ? `${visible(file.name)}（${file.size.toLocaleString()} B）` : '';
+  status.textContent = files.length > 1 ? 'ZIPは1件ずつ選択してください。' : '';
+  updateButtons();
+}
+
+input.addEventListener('change', () => selectFiles(Array.from(input.files)));
+const drop = byId('drop');
+drop.addEventListener('dragover', event => event.preventDefault());
+drop.addEventListener('drop', event => {
+  event.preventDefault();
+  selectFiles(Array.from(event.dataTransfer.files));
+});
+mode.addEventListener('change', () => {
+  updateButtons();
+  if (scan) { page = 0; render(); }
+});
+cancel.addEventListener('click', () => {
+  resetResult();
+  status.textContent = '検査を中止しました。';
+  updateButtons();
+  button.focus();
+});
+byId('previous').addEventListener('click', () => { page--; renderPage(); });
+byId('next').addEventListener('click', () => { page++; renderPage(); });
+byId('directory-view').addEventListener('change', () => { page = 0; renderPage(); });
+button.addEventListener('click', async () => {
+  if (button.disabled) return;
+  resetResult();
+  const current = new AbortController();
+  controller = current;
+  updateButtons();
+  status.textContent = 'ファイル一覧を取得中';
+  try {
+    const inspected = await inspectZip(file, {
+      signal: current.signal,
+      progress: (done, total, depth) => {
+        if (controller === current && (done % 16 === 0 || done === total)) {
+          status.textContent = `${depth ? 'ネストZIPの' : ''}本文を検査中（${done}／${total}）`;
+        }
+      }
+    });
+    if (current !== controller) return;
+    scan = inspected;
+    render();
+    status.textContent = `検査結果　${display.state}`;
+  } catch (error) {
+    if (current === controller) status.textContent = `検査エラー　${error.message}`;
+  } finally {
+    if (current === controller) {
+      controller = null;
+      updateButtons();
+    }
+  }
+});
+byId('copy').addEventListener('click', async () => {
+  const current = display;
+  if (!current) return;
+  try {
+    await navigator.clipboard.writeText(report.value);
+    if (current !== display) return;
+    reportStatus.textContent = 'Markdownをコピーしました。';
+  } catch {
+    if (current !== display) return;
+    report.hidden = false;
+    report.focus();
+    report.select();
+    let copied = false;
+    try { copied = document.execCommand('copy'); } catch { /* The selected text remains available. */ }
+    if (copied) {
+      reportStatus.textContent = 'Markdownをコピーしました。';
+    } else {
+      reportStatus.textContent = '選択したMarkdownを手動でコピーできます。';
+    }
+  }
+});
+byId('download').addEventListener('click', () => {
+  if (!display) return;
+  const link = node('a');
+  const url = URL.createObjectURL(new Blob([report.value], { type: 'text/markdown;charset=utf-8' }));
+  link.href = url;
+  link.download = 'liczip-report.md';
+  document.body.append(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+  reportStatus.textContent = 'Markdownのダウンロードを開始しました。';
+});
+</script>
+</body>
+</html>
